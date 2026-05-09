@@ -16,7 +16,8 @@
   "scripts": {
     "upload": "node upload.js",
     "purge": "node purge.js",
-    "sync": "node sync.js"
+    "sync": "node sync.js",
+    "upload-installer": "node upload-installer.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.943.0",

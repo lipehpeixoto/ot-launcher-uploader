@@ -45,30 +45,31 @@ async function readClientFiles() {
     const clientDir = path.resolve(process.env.CLIENT_PATH)
     const files = fs.readdirSync(clientDir, { withFileTypes: true, recursive: true })
     const localFiles = {}
+    const hashLimit = pLimit(50)
 
-    const tasks = files.map(
-        (file) =>
-            new Promise((resolve, reject) => {
-                if (file.isFile()) {
-                    const filePath = path.join(file.path, file.name)
-                    const relativeFilePath = path.relative(clientDir, filePath).replace(/\\/g, '/')
-                    const hash = crypto.createHash('md5')
-                    const stream = fs.createReadStream(filePath)
+    const tasks = files
+        .filter((file) => file.isFile())
+        .map((file) =>
+            hashLimit(
+                () =>
+                    new Promise((resolve, reject) => {
+                        const filePath = path.join(file.parentPath || file.path, file.name)
+                        const relativeFilePath = path.relative(clientDir, filePath).replace(/\\/g, '/')
+                        const hash = crypto.createHash('md5')
+                        const stream = fs.createReadStream(filePath)
 
-                    stream.on('data', (data) => hash.update(data))
-                    stream.on('end', () => {
-                        localFiles[relativeFilePath] = {
-                            size: fs.statSync(filePath).size,
-                            hash: hash.digest('hex')
-                        }
-                        resolve()
+                        stream.on('data', (data) => hash.update(data))
+                        stream.on('end', () => {
+                            localFiles[relativeFilePath] = {
+                                size: fs.statSync(filePath).size,
+                                hash: hash.digest('hex')
+                            }
+                            resolve()
+                        })
+                        stream.on('error', reject)
                     })
-                    stream.on('error', reject)
-                } else {
-                    resolve()
-                }
-            })
-    )
+            )
+        )
 
     await Promise.all(tasks)
     return localFiles
@@ -138,15 +139,17 @@ for (const [filePath, fileInfo] of Object.entries(localFiles)) {
     if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
         tasks.push(limit(async () => {
             await uploadFileToR2(absolutePath, filePath)
-            progressBar(++completed, totalFiles, now)
+            try { progressBar(++completed, totalFiles, now) } catch(e) {}
         }))
     }
 }
 
 await Promise.all(tasks)
 
+console.log(`\nUploaded ${totalFiles} file(s).`)
+
 fs.writeFileSync('manifest.json', JSON.stringify(localFiles))
 await uploadFileToR2('manifest.json', 'manifest.json', 'application/json')
 fs.unlinkSync('manifest.json')
 
-console.log("\nSync completed.")
+console.log("Sync completed.")

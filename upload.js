@@ -45,44 +45,58 @@ async function readClientFiles() {
   const clientDir = path.resolve(process.env.CLIENT_PATH)
   const files = fs.readdirSync(clientDir, { withFileTypes: true, recursive: true })
   const localFiles = {}
+  const hashLimit = pLimit(50)
 
-  const tasks = files.map(
-    (file) =>
-      new Promise((resolve, reject) => {
-        if (file.isFile()) {
-          const filePath = path.join(file.path, file.name)
-          const relativeFilePath = path.relative(clientDir, filePath).replace(/\\/g, '/')
-          const hash = crypto.createHash('md5')
-          const stream = fs.createReadStream(filePath)
+  const tasks = files
+    .filter((file) => file.isFile())
+    .map((file) =>
+      hashLimit(
+        () =>
+          new Promise((resolve, reject) => {
+            const filePath = path.join(file.parentPath || file.path, file.name)
+            const relativeFilePath = path.relative(clientDir, filePath).replace(/\\/g, '/')
+            const hash = crypto.createHash('md5')
+            const stream = fs.createReadStream(filePath)
 
-          stream.on('data', (data) => hash.update(data))
-          stream.on('end', () => {
-            localFiles[relativeFilePath] = {
-              size: fs.statSync(filePath).size,
-              hash: hash.digest('hex')
-            }
-            resolve()
+            stream.on('data', (data) => hash.update(data))
+            stream.on('end', () => {
+              localFiles[relativeFilePath] = {
+                size: fs.statSync(filePath).size,
+                hash: hash.digest('hex')
+              }
+              resolve()
+            })
+            stream.on('error', reject)
           })
-          stream.on('error', reject)
-        } else {
-          resolve()
-        }
-      })
-  )
+      )
+    )
 
   await Promise.all(tasks)
   return localFiles
 }
 
-async function uploadFileToR2(localPath, remotePath, contentType = 'application/octet-stream') {
-  const command = new PutObjectCommand({
-    Bucket: process.env.R2_BUCKET,
-    Key: remotePath,
-    Body: fs.createReadStream(localPath),
-    ContentType: contentType
-  })
+function encodeR2Key(key) {
+  return key.split('/').map(s => encodeURIComponent(s)).join('/')
+}
 
-  await s3Client.send(command)
+async function uploadFileToR2(localPath, remotePath, contentType = 'application/octet-stream', retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const command = new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET,
+        Key: remotePath,
+        Body: fs.createReadStream(localPath),
+        ContentType: contentType
+      })
+      await s3Client.send(command)
+      return
+    } catch (err) {
+      if (attempt === retries) throw err
+      const delay = attempt * 2000
+      console.error(`\n[retry ${attempt}/${retries}] ${remotePath}: ${err.code || err.message}, waiting ${delay}ms...`)
+      await new Promise((r) => setTimeout(r, delay))
+    }
+  }
 }
 
 const manifest = await fetchManifest()
