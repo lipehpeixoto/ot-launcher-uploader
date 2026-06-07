@@ -41,9 +41,16 @@ async function fetchManifest() {
     }
 }
 
-async function readClientFiles() {
-    const clientDir = path.resolve(process.env.CLIENT_PATH)
-    const files = fs.readdirSync(clientDir, { withFileTypes: true, recursive: true })
+// Walk a source dir and produce a hash map keyed by `prefix + relativePath`.
+// Client uses prefix "" (bare paths -- the format manifest has always used).
+// Canary uses prefix "canary/" so the launcher's Updater can route those
+// entries to the canary install dir on disk.
+async function readSourceTree(root, prefix) {
+    if (!root) return {}
+    const rootAbs = path.resolve(root)
+    if (!fs.existsSync(rootAbs)) return {}
+
+    const files = fs.readdirSync(rootAbs, { withFileTypes: true, recursive: true })
     const localFiles = {}
     const hashLimit = pLimit(50)
 
@@ -54,13 +61,14 @@ async function readClientFiles() {
                 () =>
                     new Promise((resolve, reject) => {
                         const filePath = path.join(file.parentPath || file.path, file.name)
-                        const relativeFilePath = path.relative(clientDir, filePath).replace(/\\/g, '/')
+                        const relativeFilePath = path.relative(rootAbs, filePath).replace(/\\/g, '/')
+                        const key = `${prefix}${relativeFilePath}`
                         const hash = crypto.createHash('md5')
                         const stream = fs.createReadStream(filePath)
 
                         stream.on('data', (data) => hash.update(data))
                         stream.on('end', () => {
-                            localFiles[relativeFilePath] = {
+                            localFiles[key] = {
                                 size: fs.statSync(filePath).size,
                                 hash: hash.digest('hex')
                             }
@@ -88,11 +96,26 @@ async function uploadFileToR2(localPath, remotePath, contentType = 'application/
 
 const manifest = await fetchManifest()
 if (Object.keys(manifest).length === 0) {
-    console.log("Failed to fetch manifest or manifest is empty. Use \"npm run updater\" instead.")
+    console.log("Failed to fetch manifest or manifest is empty. Use \"npm run upload\" instead.")
     process.exit(1)
 }
 
-const localFiles = await readClientFiles()
+const localFiles = {
+    ...(await readSourceTree(process.env.CLIENT_PATH, '')),
+    ...(await readSourceTree(process.env.CANARY_PATH, 'canary/'))
+}
+
+// Resolve a manifest key back to its on-disk absolute path. Canary keys
+// live under CANARY_PATH (strip the "canary/" prefix first); everything
+// else lives under CLIENT_PATH.
+const clientDir = process.env.CLIENT_PATH ? path.resolve(process.env.CLIENT_PATH) : null
+const canaryDir = process.env.CANARY_PATH ? path.resolve(process.env.CANARY_PATH) : null
+function resolveLocalPath(key) {
+    if (key.startsWith('canary/')) {
+        return path.join(canaryDir, key.slice('canary/'.length))
+    }
+    return path.join(clientDir, key)
+}
 
 let filesToDelete = []
 for (const [filePath, _] of Object.entries(manifest)) {
@@ -101,7 +124,6 @@ for (const [filePath, _] of Object.entries(manifest)) {
     }
 }
 
-const clientDir = path.resolve(process.env.CLIENT_PATH)
 const tasks = []
 let completed = 0
 let now = new Date()
@@ -134,7 +156,7 @@ completed = 0
 now = new Date()
 
 for (const [filePath, fileInfo] of Object.entries(localFiles)) {
-    const absolutePath = path.join(clientDir, filePath)
+    const absolutePath = resolveLocalPath(filePath)
     const manifestFile = manifest[filePath]
     if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
         tasks.push(limit(async () => {

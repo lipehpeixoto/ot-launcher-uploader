@@ -16,6 +16,7 @@
   "scripts": {
     "upload": "node upload.js",
     "purge": "node purge.js",
+    "stage-canary": "node stage-canary-release.js",
     "sync": "node sync.js",
     "upload-installer": "node upload-installer.js"
   },
