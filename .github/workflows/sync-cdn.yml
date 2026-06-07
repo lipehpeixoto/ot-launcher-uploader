@@ -1,0 +1,91 @@
+name: Sync CDN
+
+# Runs the canary half of the R2 sync. Two trigger modes:
+#
+#  - workflow_dispatch  -- manual button in the Actions tab. Useful for
+#    re-syncing after a manual change to the canary repo (or for the
+#    very first run after this workflow lands).
+#  - repository_dispatch (type: canary-push) -- fired by the notify-cdn
+#    workflow in the ranch-simulator repo whenever a push lands on a
+#    deployable branch. This is the "git push and done" path.
+#
+# The workflow checks out this repo + the canary repo, stages the
+# canary runtime tree (allowlisted subset), and runs sync.js with
+# CLIENT_PATH unset so the scope guard preserves the client manifest
+# entries untouched. Manual client syncs continue via the local
+# `npm run sync` flow.
+#
+# Required repository secrets:
+#   R2_CDN_URL, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#   R2_REGION, S3_ENDPOINT  -- copied verbatim from the local .env
+#   CANARY_READ_TOKEN       -- fine-grained PAT, contents:read on the
+#                              ranch-simulator repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_branch:
+        description: 'Branch of ranch-simulator (canary) to deploy'
+        required: false
+        default: 'sqlite-migration'
+  repository_dispatch:
+    types: [canary-push]
+
+# Never run two syncs at the same time. Cancelling mid-flight is
+# unsafe (would leave a half-written manifest on R2), so queue instead.
+concurrency:
+  group: sync-cdn
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout uploader
+        uses: actions/checkout@v4
+
+      - name: Determine canary ref
+        id: ref
+        run: |
+          REF="${{ github.event.inputs.canary_branch }}"
+          if [ -z "$REF" ]; then REF="${{ github.event.client_payload.branch }}"; fi
+          if [ -z "$REF" ]; then REF="sqlite-migration"; fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Will deploy canary ref: $REF"
+
+      - name: Checkout canary
+        uses: actions/checkout@v4
+        with:
+          repository: lipehpeixoto/ranch-simulator
+          ref: ${{ steps.ref.outputs.ref }}
+          path: ranch-simulator
+          token: ${{ secrets.CANARY_READ_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Stage canary runtime tree
+        env:
+          CANARY_SOURCE: ${{ github.workspace }}/ranch-simulator
+          CANARY_PATH: ${{ github.workspace }}/canary-stage
+        run: npm run stage-canary
+
+      - name: Sync to R2 (canary scope only)
+        env:
+          # CLIENT_PATH intentionally unset. The scope guard in sync.js
+          # preserves all non-canary entries in the manifest verbatim.
+          CANARY_PATH: ${{ github.workspace }}/canary-stage
+          UPLOAD_CONCURRENCY: 5
+          R2_CDN_URL: ${{ secrets.R2_CDN_URL }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_REGION: ${{ secrets.R2_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+        run: npm run sync
