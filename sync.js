@@ -117,11 +117,19 @@ function resolveLocalPath(key) {
     return path.join(clientDir, key)
 }
 
+// A given run only "manages" the namespaces it has a source tree for.
+// A canary-only run (Action triggered by ot-canary push) MUST NOT
+// delete client entries from R2 just because it can't see them locally
+// -- they belong to a separate sync run that's not happening now.
+function isManaged(key) {
+    return key.startsWith('canary/') ? !!process.env.CANARY_PATH : !!process.env.CLIENT_PATH
+}
+
 let filesToDelete = []
 for (const [filePath, _] of Object.entries(manifest)) {
-    if (!localFiles[filePath]) {
-        filesToDelete.push(filePath)
-    }
+    if (localFiles[filePath]) continue
+    if (!isManaged(filePath)) continue
+    filesToDelete.push(filePath)
 }
 
 const tasks = []
@@ -170,7 +178,19 @@ await Promise.all(tasks)
 
 console.log(`\nUploaded ${totalFiles} file(s).`)
 
-fs.writeFileSync('manifest.json', JSON.stringify(localFiles))
+// New manifest = everything we just synced + foreign entries we kept
+// alive (anything from the remote manifest we don't manage this run).
+// Without this preservation step, a canary-only sync would wipe every
+// client entry from the manifest and the launcher's clean-pass would
+// then delete those files from every install.
+const newManifest = { ...localFiles }
+for (const [k, v] of Object.entries(manifest)) {
+    if (!isManaged(k) && !newManifest[k]) {
+        newManifest[k] = v
+    }
+}
+
+fs.writeFileSync('manifest.json', JSON.stringify(newManifest))
 await uploadFileToR2('manifest.json', 'manifest.json', 'application/json')
 fs.unlinkSync('manifest.json')
 
