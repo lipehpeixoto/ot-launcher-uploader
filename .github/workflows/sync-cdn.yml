@@ -76,6 +76,15 @@ jobs:
           CANARY_PATH: ${{ github.workspace }}/canary-stage
         run: npm run stage-canary
 
+      - name: Debug manifest reachability
+        env:
+          R2_CDN_URL: ${{ secrets.R2_CDN_URL }}
+        run: |
+          echo "URL env len: ${#R2_CDN_URL}"
+          echo "First 8 chars: ${R2_CDN_URL:0:8}"
+          curl -sI "$R2_CDN_URL/manifest.json" | head -5 || true
+          curl -fsSL "$R2_CDN_URL/manifest.json" -o /tmp/m.json && wc -c /tmp/m.json && head -c 120 /tmp/m.json
+
       - name: Sync to R2 (canary scope only)
         env:
           # CLIENT_PATH intentionally unset. The scope guard in sync.js
