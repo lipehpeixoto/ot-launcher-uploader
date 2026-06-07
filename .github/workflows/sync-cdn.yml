@@ -1,25 +1,28 @@
 name: Sync CDN
 
-# Runs the canary half of the R2 sync. Two trigger modes:
+# Full R2 sync covering both channels. Triggers:
 #
-#  - workflow_dispatch  -- manual button in the Actions tab. Useful for
-#    re-syncing after a manual change to the canary repo (or for the
-#    very first run after this workflow lands).
-#  - repository_dispatch (type: canary-push) -- fired by the notify-cdn
-#    workflow in the ranch-simulator repo whenever a push lands on a
-#    deployable branch. This is the "git push and done" path.
+#  - workflow_dispatch  -- manual run from the Actions tab. Useful for
+#    re-syncing after a manual change or as a one-shot recovery tool.
+#  - repository_dispatch (canary-push) -- fired by notify-cdn in the
+#    ranch-simulator repo. Pushes on a deployable branch hit this.
+#  - repository_dispatch (client-push) -- fired by notify-cdn in the
+#    thornfeld-launcher repo when otclient/ contents change.
 #
-# The workflow checks out this repo + the canary repo, stages the
-# canary runtime tree (allowlisted subset), and runs sync.js with
-# CLIENT_PATH unset so the scope guard preserves the client manifest
-# entries untouched. Manual client syncs continue via the local
-# `npm run sync` flow.
+# Each run unconditionally checks out both source repos and syncs
+# both scopes. The scope guard in sync.js makes this safe -- only the
+# files that actually changed get uploaded; everything else is a no-op.
+# Running "the full sync" on every trigger keeps the workflow simple
+# (no conditional steps based on event_type) at the cost of a few
+# seconds of harmless hashing on the inactive side.
 #
 # Required repository secrets:
 #   R2_CDN_URL, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
 #   R2_REGION, S3_ENDPOINT  -- copied verbatim from the local .env
-#   CANARY_READ_TOKEN       -- fine-grained PAT, contents:read on the
-#                              ranch-simulator repo
+#   CANARY_READ_TOKEN       -- fine-grained PAT, contents:read on
+#                              lipehpeixoto/ranch-simulator
+#   LAUNCHER_READ_TOKEN     -- fine-grained PAT, contents:read on
+#                              lipehpeixoto/thornfeld-launcher
 
 on:
   workflow_dispatch:
@@ -28,8 +31,12 @@ on:
         description: 'Branch of ranch-simulator (canary) to deploy'
         required: false
         default: 'sqlite-migration'
+      launcher_branch:
+        description: 'Branch of thornfeld-launcher (client) to deploy'
+        required: false
+        default: 'main'
   repository_dispatch:
-    types: [canary-push]
+    types: [canary-push, client-push]
 
 # Never run two syncs at the same time. Cancelling mid-flight is
 # unsafe (would leave a half-written manifest on R2), so queue instead.
@@ -45,22 +52,40 @@ jobs:
       - name: Checkout uploader
         uses: actions/checkout@v4
 
-      - name: Determine canary ref
+      - name: Determine refs
         id: ref
         run: |
-          REF="${{ github.event.inputs.canary_branch }}"
-          if [ -z "$REF" ]; then REF="${{ github.event.client_payload.branch }}"; fi
-          if [ -z "$REF" ]; then REF="sqlite-migration"; fi
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "Will deploy canary ref: $REF"
+          CANARY_REF="${{ github.event.inputs.canary_branch }}"
+          if [ -z "$CANARY_REF" ] && [ "${{ github.event.action }}" = "canary-push" ]; then
+            CANARY_REF="${{ github.event.client_payload.branch }}"
+          fi
+          if [ -z "$CANARY_REF" ]; then CANARY_REF="sqlite-migration"; fi
+
+          LAUNCHER_REF="${{ github.event.inputs.launcher_branch }}"
+          if [ -z "$LAUNCHER_REF" ] && [ "${{ github.event.action }}" = "client-push" ]; then
+            LAUNCHER_REF="${{ github.event.client_payload.branch }}"
+          fi
+          if [ -z "$LAUNCHER_REF" ]; then LAUNCHER_REF="main"; fi
+
+          echo "canary=$CANARY_REF" >> "$GITHUB_OUTPUT"
+          echo "launcher=$LAUNCHER_REF" >> "$GITHUB_OUTPUT"
+          echo "canary ref: $CANARY_REF, launcher ref: $LAUNCHER_REF"
 
       - name: Checkout canary
         uses: actions/checkout@v4
         with:
           repository: lipehpeixoto/ranch-simulator
-          ref: ${{ steps.ref.outputs.ref }}
+          ref: ${{ steps.ref.outputs.canary }}
           path: ranch-simulator
           token: ${{ secrets.CANARY_READ_TOKEN }}
+
+      - name: Checkout launcher (for otclient/)
+        uses: actions/checkout@v4
+        with:
+          repository: lipehpeixoto/thornfeld-launcher
+          ref: ${{ steps.ref.outputs.launcher }}
+          path: thornfeld-launcher
+          token: ${{ secrets.LAUNCHER_READ_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -76,10 +101,11 @@ jobs:
           CANARY_PATH: ${{ github.workspace }}/canary-stage
         run: npm run stage-canary
 
-      - name: Sync to R2 (canary scope only)
+      - name: Sync to R2 (full)
         env:
-          # CLIENT_PATH intentionally unset. The scope guard in sync.js
-          # preserves all non-canary entries in the manifest verbatim.
+          # Both scopes managed in a single run; scope guard in sync.js
+          # handles each independently and skips entries unchanged on R2.
+          CLIENT_PATH: ${{ github.workspace }}/thornfeld-launcher/otclient
           CANARY_PATH: ${{ github.workspace }}/canary-stage
           UPLOAD_CONCURRENCY: 5
           R2_CDN_URL: ${{ secrets.R2_CDN_URL }}
