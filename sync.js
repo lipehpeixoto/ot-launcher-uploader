@@ -143,7 +143,7 @@ for (const filePath of filesToDelete) {
             Key: filePath
         })
         await s3Client.send(command)
-        progressBar(++completed, filesToDelete.length, now)
+        try { progressBar(++completed, filesToDelete.length, now) } catch(e) {}
     }))
 }
 
