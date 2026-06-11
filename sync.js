@@ -3,7 +3,7 @@ import axios from 'axios'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import pLimit from "p-limit";
 import { progressBar } from 'progress-bar-cli'
 
@@ -125,58 +125,44 @@ function isManaged(key) {
     return key.startsWith('canary/') ? !!process.env.CANARY_PATH : !!process.env.CLIENT_PATH
 }
 
-let filesToDelete = []
-for (const [filePath, _] of Object.entries(manifest)) {
-    if (localFiles[filePath]) continue
-    if (!isManaged(filePath)) continue
-    filesToDelete.push(filePath)
+// Files are stored content-addressed under blobs/<md5>. Blobs are
+// immutable and never deleted by a sync: an archived stable manifest
+// may still reference them (that's what makes promote/rollback safe).
+// A file removed locally simply drops out of the new manifest below.
+//
+// FULL_SYNC=true forces every blob up regardless of what the manifest
+// says -- used for the one-time migration from path-addressed storage
+// and as a recovery tool when R2 and manifest drift.
+const FULL_SYNC = process.env.FULL_SYNC === 'true'
+
+// Dedupe by hash: identical content at two paths is one blob. A file
+// whose hash already matches the remote manifest was uploaded by an
+// earlier run, so it's skipped (unless FULL_SYNC).
+const blobsToUpload = new Map()
+for (const [filePath, fileInfo] of Object.entries(localFiles)) {
+    const manifestFile = manifest[filePath]
+    if (FULL_SYNC || !manifestFile || manifestFile.hash !== fileInfo.hash) {
+        if (!blobsToUpload.has(fileInfo.hash)) {
+            blobsToUpload.set(fileInfo.hash, resolveLocalPath(filePath))
+        }
+    }
 }
 
 const tasks = []
 let completed = 0
-let now = new Date()
+const now = new Date()
+const totalFiles = blobsToUpload.size
 
-for (const filePath of filesToDelete) {
+for (const [hash, absolutePath] of blobsToUpload) {
     tasks.push(limit(async () => {
-        const command = new DeleteObjectCommand({
-            Bucket: process.env.R2_BUCKET,
-            Key: filePath
-        })
-        await s3Client.send(command)
-        try { progressBar(++completed, filesToDelete.length, now) } catch(e) {}
+        await uploadFileToR2(absolutePath, `blobs/${hash}`)
+        try { progressBar(++completed, totalFiles, now) } catch(e) {}
     }))
 }
 
 await Promise.all(tasks)
 
-tasks.length = 0
-
-let totalFiles = 0
-
-for (const [filePath, fileInfo] of Object.entries(localFiles)) {
-    const manifestFile = manifest[filePath]
-    if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
-        totalFiles++
-    }
-}
-
-completed = 0
-now = new Date()
-
-for (const [filePath, fileInfo] of Object.entries(localFiles)) {
-    const absolutePath = resolveLocalPath(filePath)
-    const manifestFile = manifest[filePath]
-    if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
-        tasks.push(limit(async () => {
-            await uploadFileToR2(absolutePath, filePath)
-            try { progressBar(++completed, totalFiles, now) } catch(e) {}
-        }))
-    }
-}
-
-await Promise.all(tasks)
-
-console.log(`\nUploaded ${totalFiles} file(s).`)
+console.log(`\nUploaded ${totalFiles} blob(s).`)
 
 // New manifest = everything we just synced + foreign entries we kept
 // alive (anything from the remote manifest we don't manage this run).

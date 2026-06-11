@@ -35,6 +35,11 @@ on:
         description: 'Branch of thornfeld-launcher (client) to deploy'
         required: false
         default: 'main'
+      full_sync:
+        description: 'Force-upload every blob even if the manifest says it exists (migration / recovery)'
+        required: false
+        type: boolean
+        default: false
   repository_dispatch:
     types: [canary-push, client-push]
 
@@ -108,6 +113,7 @@ jobs:
           CLIENT_PATH: ${{ github.workspace }}/thornfeld-launcher/otclient
           CANARY_PATH: ${{ github.workspace }}/canary-stage
           UPLOAD_CONCURRENCY: 5
+          FULL_SYNC: ${{ github.event.inputs.full_sync || 'false' }}
           R2_CDN_URL: ${{ secrets.R2_CDN_URL }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

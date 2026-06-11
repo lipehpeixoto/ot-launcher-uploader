@@ -105,24 +105,25 @@ const localFiles = await readClientFiles()
 const clientDir = path.resolve(process.env.CLIENT_PATH)
 const tasks = []
 let completed = 0
-let total = 0
+
+// Content-addressed storage: blobs/<md5>, deduped by hash. Mirrors
+// sync.js -- see the comment there for why blobs are never deleted.
+const blobsToUpload = new Map()
 for (const [filePath, fileInfo] of Object.entries(localFiles)) {
   const manifestFile = manifest[filePath]
   if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
-    total++
+    if (!blobsToUpload.has(fileInfo.hash)) {
+      blobsToUpload.set(fileInfo.hash, path.join(clientDir, filePath))
+    }
   }
 }
 
 const now = new Date()
-for (const [filePath, fileInfo] of Object.entries(localFiles)) {
-  const absolutePath = path.join(clientDir, filePath)
-  const manifestFile = manifest[filePath]
-  if (!manifestFile || manifestFile.hash !== fileInfo.hash) {
-    tasks.push(limit(async () => {
-      await uploadFileToR2(absolutePath, filePath)
-      progressBar(++completed, total, now)
-    }))
-  }
+for (const [hash, absolutePath] of blobsToUpload) {
+  tasks.push(limit(async () => {
+    await uploadFileToR2(absolutePath, `blobs/${hash}`)
+    progressBar(++completed, blobsToUpload.size, now)
+  }))
 }
 
 await Promise.all(tasks)

@@ -1,0 +1,58 @@
+name: Promote Stable
+
+# Promotes the current manifest.json (latest channel, rewritten on every
+# push) to manifest-stable.json (the manifest packaged player launchers
+# read). Run it from the Actions tab when the latest channel is tested
+# and ready for players.
+#
+# The outgoing stable manifest is always archived first under
+# manifests/stable-<timestamp>.json. To roll back, run this workflow
+# again with the archive name in the "restore" input (use
+# "npm run promote -- --list" locally, or check the bucket, to find it).
+#
+# Required repository secrets (same R2 set sync-cdn.yml uses):
+#   R2_CDN_URL, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#   R2_REGION, S3_ENDPOINT
+
+on:
+  workflow_dispatch:
+    inputs:
+      restore:
+        description: 'Archived manifest to restore (e.g. stable-2026-06-11T12-00-00-000Z.json). Leave empty to promote latest.'
+        required: false
+        default: ''
+
+concurrency:
+  group: promote-stable
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout uploader
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Promote
+        env:
+          R2_CDN_URL: ${{ secrets.R2_CDN_URL }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_REGION: ${{ secrets.R2_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+        run: |
+          if [ -n "${{ github.event.inputs.restore }}" ]; then
+            node promote.js --restore "${{ github.event.inputs.restore }}"
+          else
+            node promote.js
+          fi
